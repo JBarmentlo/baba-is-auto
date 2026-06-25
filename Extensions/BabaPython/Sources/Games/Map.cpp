@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2026 Chris Ohk
+// Copyright (c) 2020-2023 Chris Ohk
 
 // I am making my contributions/submissions to this project solely in our
 // personal capacity and am not conveying any rights to any intellectual
@@ -29,5 +29,6 @@ void AddMap(pybind11::module& m)
             "At",
             static_cast<const Object& (Map::*)(std::size_t, std::size_t) const>(
                 &Map::At))
-        .def("GetPositions", &Map::GetPositions);
+        .def("GetPositions", &Map::GetPositions)
+        .def("GetGrid", &Map::GetGrid);
 }

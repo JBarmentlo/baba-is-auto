@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2026 Chris Ohk
+// Copyright (c) 2020-2023 Chris Ohk
 
 // I am making my contributions/submissions to this project solely in our
 // personal capacity and am not conveying any rights to any intellectual
@@ -76,6 +76,10 @@ class Map
     //! \param type An object type to get a list of positions.
     //! \return A list of icon positions.
     std::vector<Position> GetPositions(ObjectType type) const;
+
+
+   //  std::vector<ObjectType> GetGrid(void) const
+    std::vector<std::vector<ObjectType>> GetGrid(void) const;
 
  private:
     //! Checks position (x, y) is boundary.

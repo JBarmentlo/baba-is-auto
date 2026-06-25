@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2026 Chris Ohk
+// Copyright (c) 2020-2023 Chris Ohk
 
 // I am making my contributions/submissions to this project solely in our
 // personal capacity and am not conveying any rights to any intellectual
@@ -90,6 +90,22 @@ std::vector<Position> Map::GetPositions(ObjectType type) const
             {
                 res.emplace_back(std::make_pair(x, y));
             }
+        }
+    }
+
+    return res;
+}
+
+std::vector<std::vector<ObjectType>> Map::GetGrid() const
+{
+    std::vector<std::vector<ObjectType>> res;
+
+    for (std::size_t y = 0; y < m_height; ++y)
+    {
+        for (std::size_t x = 0; x < m_width; ++x)
+        {
+            std::vector<ObjectType> vec = std::vector<ObjectType>();
+            res.emplace_back(At(x, y).GetTypes());
         }
     }
 

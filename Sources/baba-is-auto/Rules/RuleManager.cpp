@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2026 Chris Ohk
+// Copyright (c) 2020-2023 Chris Ohk
 
 // I am making my contributions/submissions to this project solely in our
 // personal capacity and am not conveying any rights to any intellectual
@@ -42,6 +42,18 @@ std::vector<Rule> RuleManager::GetRules(ObjectType type) const
         {
             ret.emplace_back(rule);
         }
+    }
+
+    return ret;
+}
+
+std::vector<Rule> RuleManager::GetAllRules() const
+{
+    std::vector<Rule> ret;
+
+    for (auto& rule : m_rules)
+    {
+        ret.emplace_back(rule);
     }
 
     return ret;

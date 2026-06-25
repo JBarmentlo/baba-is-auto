@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2026 Chris Ohk
+// Copyright (c) 2020-2023 Chris Ohk
 
 // I am making my contributions/submissions to this project solely in our
 // personal capacity and am not conveying any rights to any intellectual
@@ -19,6 +19,7 @@ void AddRuleManager(pybind11::module& m)
         .def("RemoveRule", &RuleManager::RemoveRule)
         .def("ClearRules", &RuleManager::ClearRules)
         .def("GetRules", &RuleManager::GetRules)
+        .def("GetAllRules", &RuleManager::GetAllRules)
         .def("GetNumRules", &RuleManager::GetNumRules)
         .def("FindPlayer", &RuleManager::FindPlayer)
         .def("HasProperty", &RuleManager::HasProperty);

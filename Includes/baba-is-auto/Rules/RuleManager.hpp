@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2026 Chris Ohk
+// Copyright (c) 2020-2023 Chris Ohk
 
 // I am making my contributions/submissions to this project solely in our
 // personal capacity and am not conveying any rights to any intellectual
@@ -36,6 +36,7 @@ class RuleManager
     //! \param type The object type to find a rule.
     //! \return A list of rules that has specific type.
     std::vector<Rule> GetRules(ObjectType type) const;
+    std::vector<Rule> GetAllRules() const;
 
     //! Gets the number of rules.
     //! \return The number of rules.
