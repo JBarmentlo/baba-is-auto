@@ -125,6 +125,37 @@ python setup.py build_ext --inplace        # produces pyBaba.cpython-3XX-*.so at
 The server adds the repo root to `sys.path`, so an in-place `pyBaba*.so` is found
 regardless of where the server is launched from.
 
+### Container image (HTTP) + enroot `.sqsh`
+
+`Dockerfile.mcp` (at the repo root) builds a self-contained image whose entrypoint
+starts the **HTTP** MCP; the port is set with the `BABA_MCP_PORT` env var. It builds
+`pyBaba` against a pinned uv-managed CPython 3.12 used for both build and runtime
+(so the module ABI always matches).
+
+```bash
+# Build (uses the heavy vcpkg toolchain; ~15 min cold).
+docker build -f Dockerfile.mcp -t baba-mcp:latest .
+
+# Run — pick the port with BABA_MCP_PORT.
+docker run --rm -e BABA_MCP_PORT=8000 -p 8000:8000 baba-mcp:latest
+# serves streamable-http at http://0.0.0.0:8000/mcp ; clients send a
+# `baba_session_id` header (see "Connecting an HTTP client").
+```
+
+Override the port (or any other `BABA_MCP_*`) at run time, e.g.
+`docker run -e BABA_MCP_PORT=9000 -p 9000:9000 baba-mcp:latest`.
+
+For Slurm/pyxis clusters, produce an enroot squashfs from the image:
+
+```bash
+enroot import -o baba-mcp.sqsh dockerd://baba-mcp:latest
+# then, e.g.:  srun --container-image=./baba-mcp.sqsh --container-env=BABA_MCP_PORT=8000 ...
+```
+
+The import captures the image's `BABA_MCP_*` env and the entrypoint
+(`/opt/venv/bin/python -m baba_mcp.server`), so the `.sqsh` starts the HTTP server
+directly; override `BABA_MCP_PORT` via your scheduler's env mechanism.
+
 ### Build on a bare CPU node (from scratch)
 
 These are the exact, reproducible steps for a fresh, minimal Linux CPU node (the

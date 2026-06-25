@@ -39,5 +39,12 @@ __pycache__/
 /.venv
 /.buildvenv
 
+# Container images / enroot artifacts
+*.sqsh
+/.enroot-tmp
+/.enroot-data
+/.enroot-run
+/.enroot-cache
+
 # RL files
 events.out.tfevents.*

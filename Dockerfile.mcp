@@ -1,0 +1,74 @@
+# BabaMCP — HTTP MCP server wrapping the pyBaba "Baba Is You" simulator.
+#
+# Build:  podman build -f Dockerfile.mcp -t baba-mcp:latest .
+# Run:    podman run -e BABA_MCP_PORT=8000 -p 8000:8000 baba-mcp:latest
+#
+# The server listens on HTTP (streamable-http) at 0.0.0.0:$BABA_MCP_PORT/mcp.
+# Clients select an independent game via the `baba_session_id` request header.
+FROM ubuntu:26.04
+LABEL maintainer="JBarmentlo"
+
+# Build + runtime toolchain. zip + autotools are required by several vcpkg ports.
+RUN apt-get update && apt-get install -y \
+    autoconf \
+    autoconf-archive \
+    automake \
+    build-essential \
+    curl \
+    git \
+    libtool \
+    ninja-build \
+    pkg-config \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    python3-venv \
+    tar \
+    unzip \
+    zip \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# cmake >= 3.31.6 (Ubuntu's apt cmake is older), installed into an isolated venv.
+ENV CMAKE_VENV=/opt/cmake-venv
+RUN python3 -m venv ${CMAKE_VENV} && \
+    ${CMAKE_VENV}/bin/pip install "cmake>=3.31.6"
+ENV PATH="${CMAKE_VENV}/bin:${PATH}"
+
+# vcpkg toolchain (provides pybind11, doctest, effolkronium-random).
+ENV VCPKG_ROOT=/opt/vcpkg
+ENV VCPKG_EXTRA_CURL_OPTS="-k"
+RUN git clone https://github.com/microsoft/vcpkg.git ${VCPKG_ROOT} && \
+    ${VCPKG_ROOT}/bootstrap-vcpkg.sh
+
+# uv provides a reproducible standalone CPython. We pin one interpreter for BOTH
+# building and running pyBaba so the module ABI always matches (the base image's
+# system python is a different version, which is what caused ABI mismatches).
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+ENV BABA_VENV=/opt/venv
+ENV BABA_PYTHON=3.12
+RUN uv venv ${BABA_VENV} --python ${BABA_PYTHON} && \
+    uv pip install --python ${BABA_VENV} setuptools wheel pybind11 "mcp>=1.8"
+
+COPY . /app
+WORKDIR /app
+
+# Build the pyBaba extension against the venv interpreter via setup.py
+# (build_ext --inplace -> /app/pyBaba.cpython-3XX-*.so at the repo root, which
+# the server adds to sys.path). cmake + the vcpkg toolchain come from PATH /
+# VCPKG_ROOT set above. The import check fails the build fast on any ABI mismatch.
+RUN ${BABA_VENV}/bin/python setup.py build_ext --inplace && \
+    ${BABA_VENV}/bin/python -c "import sys; sys.path.insert(0,'/app'); import pyBaba; print('pyBaba import OK for', sys.version.split()[0])"
+
+# HTTP transport; port is overridable at runtime via BABA_MCP_PORT.
+ENV BABA_MCP_TRANSPORT=http \
+    BABA_MCP_HOST=0.0.0.0 \
+    BABA_MCP_PORT=8000 \
+    BABA_MCP_HTTP_PATH=/mcp \
+    PYTHONPATH=/app/Extensions/BabaMCP \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+CMD ["/opt/venv/bin/python", "-m", "baba_mcp.server"]
