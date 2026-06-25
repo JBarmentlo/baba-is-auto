@@ -1,0 +1,8 @@
+build/
+.venv/
+__pycache__/
+*.egg-info/
+*.pyc
+*.so
+.git/
+test.ipynb

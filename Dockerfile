@@ -2,9 +2,13 @@ FROM ubuntu:26.04
 LABEL maintainer "Chris Ohk <utilforever@gmail.com>"
 
 RUN apt-get update && apt-get install -y \
+    autoconf \
+    autoconf-archive \
+    automake \
     build-essential \
     curl \
     git \
+    libtool \
     ninja-build \
     pkg-config \
     python3-dev \
