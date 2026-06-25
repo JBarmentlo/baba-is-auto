@@ -1,8 +1,19 @@
 """FastMCP server exposing the pyBaba "Baba Is You" simulator.
 
-A thin, in-process layer over the ``pyBaba`` pybind11 module. It owns a single
-"current game" and lets an agent observe the board grid (not an image), submit
-moves, check win/lose status, manage levels, and undo.
+A thin, in-process layer over the ``pyBaba`` pybind11 module. It lets an agent
+observe the board grid (not an image), submit moves, check win/lose status,
+manage levels, and undo.
+
+The server supports many concurrent **sessions**, each with its own independent
+game. Over HTTP, a session is selected by the ``baba_session_id`` request header;
+over stdio there is a single implicit session.
+
+Use :func:`create_baba_mcp` to build a configured ``FastMCP`` instance and serve
+it however you like (stdio, streamable-http, or by mounting the ASGI app):
+
+    from baba_mcp import create_baba_mcp
+    mcp = create_baba_mcp(host="0.0.0.0", port=8000)
+    mcp.run(transport="streamable-http")   # or mcp.run() for stdio
 """
 
 from __future__ import annotations
@@ -10,8 +21,9 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Lock
 
 # --------------------------------------------------------------------------- #
 # Paths
@@ -29,6 +41,11 @@ if str(REPO_ROOT) not in sys.path:
 
 import pyBaba  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+# Header that selects a session over HTTP, and the implicit session id used
+# when there is no HTTP request (stdio).
+SESSION_HEADER = "baba_session_id"
+STDIO_SESSION_ID = "stdio"
 
 # --------------------------------------------------------------------------- #
 # Enum maps
@@ -50,19 +67,27 @@ STATUS = {
 }
 TERMINAL = (pyBaba.PlayState.WON, pyBaba.PlayState.LOST)
 
-# --------------------------------------------------------------------------- #
-# Current-game state (single global, guarded by a lock)
-# --------------------------------------------------------------------------- #
-_game: pyBaba.Game | None = None
-_map_name: str | None = None
-_history: list[str] = []  # action keys applied since the current map was loaded
-_lock = Lock()
-
-mcp = FastMCP("baba-is-you")
-
 
 # --------------------------------------------------------------------------- #
-# Helpers
+# Per-session state
+# --------------------------------------------------------------------------- #
+@dataclass
+class SessionState:
+    """A single client's independent game.
+
+    ``map_source``/``is_raw``/``history`` keep the session fully reconstructible
+    (load + replay) even though a live game object is retained for speed.
+    """
+
+    game: pyBaba.Game
+    map_name: str  # display name: a filename or "<raw>"
+    map_source: str  # filename for built-in maps, or raw contents when is_raw
+    is_raw: bool
+    history: list[str] = field(default_factory=list)  # action keys since load
+
+
+# --------------------------------------------------------------------------- #
+# Pure helpers (no session/global state)
 # --------------------------------------------------------------------------- #
 def _resolve_map(name: str) -> Path:
     """Resolve a map name (with or without .txt) to a path inside MAPS_DIR."""
@@ -75,22 +100,24 @@ def _resolve_map(name: str) -> Path:
     return path
 
 
-def _ensure_game() -> pyBaba.Game:
-    """Return the current game, lazily loading the default map on first use."""
-    global _game, _map_name, _history
-    if _game is None:
-        _game = pyBaba.Game(str(_resolve_map(DEFAULT_MAP)))
-        _map_name = DEFAULT_MAP
-        _history = []
-    return _game
+def _new_game_from_map(name: str) -> SessionState:
+    """Build a fresh SessionState for a built-in map name."""
+    path = _resolve_map(name)
+    return SessionState(
+        game=pyBaba.Game(str(path)),
+        map_name=path.name,
+        map_source=path.name,
+        is_raw=False,
+    )
 
 
 def _status_str(game: pyBaba.Game) -> str:
     return STATUS.get(game.GetPlayState(), "invalid")
 
 
-def _state_payload(game: pyBaba.Game) -> dict:
+def _state_payload(session: SessionState) -> dict:
     """Build the canonical state payload: the map as-is plus dimensions/status."""
+    game = session.game
     gmap = game.GetMap()
     width, height = gmap.GetWidth(), gmap.GetHeight()
     flat = gmap.GetGrid()  # row-major, length width*height; each cell a list of ObjectType
@@ -99,7 +126,7 @@ def _state_payload(game: pyBaba.Game) -> dict:
         for y in range(height)
     ]
     return {
-        "map": _map_name,
+        "map": session.map_name,
         "width": width,
         "height": height,
         "grid": grid,
@@ -143,125 +170,180 @@ def _validate_raw_map(map_contents: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tools
+# Server factory
 # --------------------------------------------------------------------------- #
-@mcp.tool()
-def list_maps() -> dict:
-    """List the names of the built-in maps available to load."""
-    return {"maps": sorted(p.stem for p in MAPS_DIR.resolve().glob("*.txt"))}
+def create_baba_mcp(
+    *,
+    max_sessions: int = 256,
+    require_session_header: bool = True,
+    **fastmcp_kwargs,
+) -> FastMCP:
+    """Create a configured FastMCP server wrapping the Baba Is You simulator.
 
+    The returned instance has all tools registered and an isolated, per-instance
+    session store. Serve it however you like::
 
-@mcp.tool()
-def load_map(name: str) -> dict:
-    """Load a built-in map by name (e.g. 'simple_map') and start a fresh game.
+        mcp = create_baba_mcp(host="0.0.0.0", port=8000)
+        mcp.run(transport="streamable-http")   # or mcp.run() for stdio
 
-    Returns the initial board state.
+    Args:
+        max_sessions: Cap on concurrent in-memory sessions; the oldest is evicted
+            (FIFO) when exceeded. An evicted client transparently gets a fresh
+            default game on its next call.
+        require_session_header: Over HTTP, require the ``baba_session_id`` header
+            on state-touching tools (recommended). If False, header-less HTTP
+            requests share a single ``"default"`` session.
+        **fastmcp_kwargs: Passed to ``FastMCP(...)`` (e.g. host, port,
+            streamable_http_path). ``stateless_http`` and ``json_response``
+            default to True but may be overridden.
     """
-    global _game, _map_name, _history
-    with _lock:
+    opts = {"stateless_http": True, "json_response": True, **fastmcp_kwargs}
+    mcp = FastMCP("baba-is-you", **opts)
+
+    # Per-instance session store. Insertion-ordered for FIFO eviction.
+    sessions: "OrderedDict[str, SessionState]" = OrderedDict()
+
+    # ----- session helpers (close over `mcp` and `sessions`) ----- #
+    def _session_id() -> str:
+        """Resolve the session id from the request header.
+
+        HTTP: read ``baba_session_id``; required unless require_session_header is
+        False (then fall back to "default"). stdio: there is no HTTP request, so
+        use the single implicit STDIO_SESSION_ID.
+        """
+        try:
+            request = mcp.get_context().request_context.request
+        except Exception:
+            request = None  # accessed outside an active request
+        if request is None:
+            return STDIO_SESSION_ID
+        sid = request.headers.get(SESSION_HEADER)
+        if sid:
+            return sid
+        if require_session_header:
+            raise ValueError(
+                f"Missing required {SESSION_HEADER!r} header. Send a unique value "
+                "per concurrent game session."
+            )
+        return "default"
+
+    def _session(session_id: str) -> SessionState:
+        """Return the session, lazily creating it with the default map."""
+        sess = sessions.get(session_id)
+        if sess is None:
+            sess = _new_game_from_map(DEFAULT_MAP)
+            sessions[session_id] = sess
+            while len(sessions) > max_sessions:
+                sessions.popitem(last=False)  # FIFO: drop the oldest session
+        else:
+            sessions.move_to_end(session_id)  # LRU touch
+        return sess
+
+    # --------------------------------- tools --------------------------------- #
+    @mcp.tool()
+    def list_maps() -> dict:
+        """List the names of the built-in maps available to load."""
+        # No session needed — enables discovery before a session header is set.
+        return {"maps": sorted(p.stem for p in MAPS_DIR.resolve().glob("*.txt"))}
+
+    @mcp.tool()
+    def load_map(name: str) -> dict:
+        """Load a built-in map by name (e.g. 'simple_map') and start a fresh game.
+
+        Returns the initial board state.
+        """
         path = _resolve_map(name)
-        _game = pyBaba.Game(str(path))
-        _map_name = path.name
-        _history = []
-        return _state_payload(_game)
+        sess = _session(_session_id())
+        sess.game = pyBaba.Game(str(path))
+        sess.map_name = path.name
+        sess.map_source = path.name
+        sess.is_raw = False
+        sess.history = []
+        return _state_payload(sess)
 
+    @mcp.tool()
+    def load_raw_map(map_contents: str) -> dict:
+        """Load a map from raw text in the native format and start a fresh game.
 
-@mcp.tool()
-def load_raw_map(map_contents: str) -> dict:
-    """Load a map from raw text in the native format and start a fresh game.
-
-    Format: a 'width height' header line followed by exactly width*height integer
-    ObjectType codes (same as the Resources/Maps/*.txt files). The contents are
-    validated before loading. Returns the initial board state.
-    """
-    global _game, _map_name, _history
-    _validate_raw_map(map_contents)
-    with _lock:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False
-        ) as tmp:
+        Format: a 'width height' header line followed by exactly width*height
+        integer ObjectType codes (same as the Resources/Maps/*.txt files). The
+        contents are validated before loading. Returns the initial board state.
+        """
+        _validate_raw_map(map_contents)
+        sess = _session(_session_id())
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
             tmp.write(map_contents)
             tmp_path = tmp.name
         try:
-            _game = pyBaba.Game(tmp_path)
+            sess.game = pyBaba.Game(tmp_path)
         finally:
             os.unlink(tmp_path)
-        _map_name = "<raw>"
-        _history = []
-        return _state_payload(_game)
+        sess.map_name = "<raw>"
+        sess.map_source = map_contents
+        sess.is_raw = True
+        sess.history = []
+        return _state_payload(sess)
 
+    @mcp.tool()
+    def reset() -> dict:
+        """Reset the current level to its initial state and clear the move history."""
+        sess = _session(_session_id())
+        sess.game.Reset()
+        sess.history = []
+        return _state_payload(sess)
 
-@mcp.tool()
-def reset() -> dict:
-    """Reset the current level to its initial state and clear the move history."""
-    global _history
-    with _lock:
-        game = _ensure_game()
-        game.Reset()
-        _history = []
-        return _state_payload(game)
+    @mcp.tool()
+    def get_state() -> dict:
+        """Return the current board: a 2D grid of stacked object-type names, plus
+        width, height, the map name, and status."""
+        return _state_payload(_session(_session_id()))
 
-
-@mcp.tool()
-def get_state() -> dict:
-    """Return the current board: a 2D grid of stacked object-type names, plus
-    width, height, the map name, and status."""
-    with _lock:
-        return _state_payload(_ensure_game())
-
-
-@mcp.tool()
-def get_status() -> dict:
-    """Return the game status: success (won), dead (lost), in_progress, or invalid."""
-    with _lock:
-        if _game is None:
+    @mcp.tool()
+    def get_status() -> dict:
+        """Return the game status: success (won), dead (lost), in_progress, or invalid."""
+        sess = sessions.get(_session_id())  # do not lazily create
+        if sess is None:
             return {"status": "no_game"}
-        return {"status": _status_str(_game), "raw": _game.GetPlayState().name}
+        return {"status": _status_str(sess.game), "raw": sess.game.GetPlayState().name}
 
-
-@mcp.tool()
-def get_rules() -> dict:
-    """Return the currently active rules as object-name triples, e.g. ['BABA','IS','YOU']."""
-    with _lock:
-        game = _ensure_game()
-        rules = game.GetRuleManager().GetAllRules()
+    @mcp.tool()
+    def get_rules() -> dict:
+        """Return the currently active rules as object-name triples, e.g. ['BABA','IS','YOU']."""
+        sess = _session(_session_id())
+        rules = sess.game.GetRuleManager().GetAllRules()
         return {"rules": [_rule_to_names(r) for r in rules]}
 
+    @mcp.tool()
+    def do_action(action: str) -> dict:
+        """Perform one move: up | down | left | right | idle. Returns the new state."""
+        key = action.strip().lower()
+        if key not in ACTIONS:
+            raise ValueError(f"Invalid action {action!r}. Valid: {VALID_ACTIONS}")
+        sess = _session(_session_id())
+        sess.game.MovePlayer(ACTIONS[key])
+        sess.history.append(key)
+        return _state_payload(sess)
 
-@mcp.tool()
-def do_action(action: str) -> dict:
-    """Perform one move: up | down | left | right | idle. Returns the new state."""
-    key = action.strip().lower()
-    if key not in ACTIONS:
-        raise ValueError(f"Invalid action {action!r}. Valid: {VALID_ACTIONS}")
-    with _lock:
-        game = _ensure_game()
-        game.MovePlayer(ACTIONS[key])
-        _history.append(key)
-        return _state_payload(game)
+    @mcp.tool()
+    def do_actions(actions: list[str]) -> dict:
+        """Perform a sequence of moves, stopping early if the game is won or lost.
 
-
-@mcp.tool()
-def do_actions(actions: list[str]) -> dict:
-    """Perform a sequence of moves, stopping early if the game is won or lost.
-
-    All actions are validated before any is applied. Returns the final state plus
-    'applied' (how many ran), 'requested', and 'stopped_reason'.
-    """
-    keys = [a.strip().lower() for a in actions]
-    bad = sorted({a for a in keys if a not in ACTIONS})
-    if bad:
-        raise ValueError(f"Invalid actions {bad}. Valid: {VALID_ACTIONS}")
-    with _lock:
-        game = _ensure_game()
+        All actions are validated before any is applied. Returns the final state
+        plus 'applied' (how many ran), 'requested', and 'stopped_reason'.
+        """
+        keys = [a.strip().lower() for a in actions]
+        bad = sorted({a for a in keys if a not in ACTIONS})
+        if bad:
+            raise ValueError(f"Invalid actions {bad}. Valid: {VALID_ACTIONS}")
+        sess = _session(_session_id())
         applied = 0
         for key in keys:
-            game.MovePlayer(ACTIONS[key])
-            _history.append(key)
+            sess.game.MovePlayer(ACTIONS[key])
+            sess.history.append(key)
             applied += 1
-            if game.GetPlayState() in TERMINAL:
+            if sess.game.GetPlayState() in TERMINAL:
                 break
-        payload = _state_payload(game)
+        payload = _state_payload(sess)
         payload.update(
             applied=applied,
             requested=len(keys),
@@ -269,37 +351,71 @@ def do_actions(actions: list[str]) -> dict:
         )
         return payload
 
+    @mcp.tool()
+    def undo(steps: int = 1) -> dict:
+        """Undo the last N moves (default 1) by resetting and replaying the history.
 
-@mcp.tool()
-def undo(steps: int = 1) -> dict:
-    """Undo the last N moves (default 1) by resetting and replaying the history.
-
-    The simulator has no native undo; this reconstructs the prior state exactly,
-    since moves are deterministic. Returns the new state plus 'undone'.
-    """
-    global _history
-    if steps < 1:
-        raise ValueError(f"steps must be >= 1, got {steps}.")
-    with _lock:
-        game = _ensure_game()
-        if not _history:
-            payload = _state_payload(game)
+        The simulator has no native undo; this reconstructs the prior state
+        exactly, since moves are deterministic. Returns the new state plus 'undone'.
+        """
+        if steps < 1:
+            raise ValueError(f"steps must be >= 1, got {steps}.")
+        sess = _session(_session_id())
+        if not sess.history:
+            payload = _state_payload(sess)
             payload["undone"] = 0
             payload["message"] = "Nothing to undo."
             return payload
-        undone = min(steps, len(_history))
-        replay = _history[:-undone]
-        game.Reset()
+        undone = min(steps, len(sess.history))
+        replay = sess.history[:-undone]
+        sess.game.Reset()
         for key in replay:
-            game.MovePlayer(ACTIONS[key])
-        _history = replay
-        payload = _state_payload(game)
+            sess.game.MovePlayer(ACTIONS[key])
+        sess.history = replay
+        payload = _state_payload(sess)
         payload["undone"] = undone
         return payload
 
+    @mcp.tool()
+    def end_session() -> dict:
+        """Free the caller's session memory. A later call lazily creates a fresh one."""
+        sid = _session_id()
+        existed = sessions.pop(sid, None) is not None
+        return {"session": sid, "ended": existed}
 
+    @mcp.tool()
+    def list_sessions() -> dict:
+        """List active sessions (id, current map, move count) for debugging/ops."""
+        return {
+            "sessions": [
+                {"id": sid, "map": s.map_name, "moves": len(s.history)}
+                for sid, s in sessions.items()
+            ],
+            "count": len(sessions),
+            "max": max_sessions,
+        }
+
+    return mcp
+
+
+# --------------------------------------------------------------------------- #
+# Console entry point (env-driven). Custom servers can import create_baba_mcp.
+# --------------------------------------------------------------------------- #
 def main() -> None:
-    mcp.run()
+    transport = os.environ.get("BABA_MCP_TRANSPORT", "stdio").strip().lower()
+    host = os.environ.get("BABA_MCP_HOST", "0.0.0.0")
+    port = int(os.environ.get("BABA_MCP_PORT", "8000"))
+    http_path = os.environ.get("BABA_MCP_HTTP_PATH", "/mcp")
+
+    if transport in ("http", "streamable-http"):
+        mcp = create_baba_mcp(host=host, port=port, streamable_http_path=http_path)
+        mcp.run(transport="streamable-http")
+    elif transport == "stdio":
+        create_baba_mcp().run()
+    else:
+        raise SystemExit(
+            f"Unknown BABA_MCP_TRANSPORT={transport!r}; expected 'stdio' or 'http'."
+        )
 
 
 if __name__ == "__main__":

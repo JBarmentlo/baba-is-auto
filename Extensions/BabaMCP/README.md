@@ -7,6 +7,10 @@ image), make moves, check win/lose status, switch levels, and undo.
 It is a thin, in-process Python layer over the `pyBaba` pybind11 module — no game
 logic is reimplemented here.
 
+Runs over **stdio** or **HTTP** (streamable-http), and supports **many concurrent
+sessions** — over HTTP each request selects its game with a `baba_session_id`
+header (see [Transports & sessions](#transports--sessions)).
+
 ## Tools
 
 | Tool | Description |
@@ -19,8 +23,10 @@ logic is reimplemented here.
 | `reset()` | Restart the current level and clear history. |
 | `load_map(name)` | Load a built-in map by name, e.g. `"simple_map"`. |
 | `load_raw_map(map_contents)` | Load a map from raw text in the native format (validated first — see below). |
-| `list_maps()` | List built-in map names. |
+| `list_maps()` | List built-in map names. Works without a session header. |
 | `get_rules()` | Active rules as object-name triples, e.g. `["BABA","IS","YOU"]`. |
+| `end_session()` | Free the caller's session (its game/history). A later call lazily recreates a fresh one. |
+| `list_sessions()` | List active sessions (`id`, `map`, `moves`) for debugging/ops. |
 
 ### Native map format (`load_raw_map`)
 
@@ -33,6 +39,51 @@ codes (same as `Resources/Maps/*.txt`). Example (3×4):
 4   67  77
 114 132 132
 132 132 132
+```
+
+## Transports & sessions
+
+The server can be served two ways:
+
+- **stdio** — the client launches it as a subprocess; there is a single implicit
+  session (id `"stdio"`). No header needed.
+- **HTTP** (streamable-http) — reachable over the network at `/mcp`. Each request
+  selects its game via the **`baba_session_id` request header**; distinct ids get
+  independent games that persist across requests. State-touching tools **require**
+  the header over HTTP and return a clear error if it's missing (`list_maps` does
+  not). Sessions are held in memory (a live game per id), capped at `max_sessions`
+  with FIFO eviction; `end_session()` frees one early.
+
+### Use the factory in your own server
+
+`create_baba_mcp(**kwargs) -> FastMCP` builds a fully-configured instance (all
+tools registered, isolated session store). Serve it however you like:
+
+```python
+from baba_mcp import create_baba_mcp
+
+mcp = create_baba_mcp(host="0.0.0.0", port=8000)   # kwargs forwarded to FastMCP(...)
+mcp.run(transport="streamable-http")               # or mcp.run() for stdio
+# or mount the ASGI app: app = mcp.streamable_http_app()  # endpoint at /mcp
+```
+
+`create_baba_mcp` accepts `max_sessions` (default 256), `require_session_header`
+(default True), and any `FastMCP` kwargs; `stateless_http=True` and
+`json_response=True` are defaulted but overridable. A ready-to-edit example is in
+[`main.py`](./main.py).
+
+### Connecting an HTTP client
+
+```python
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+async with streamablehttp_client(
+    "http://HOST:8000/mcp", headers={"baba_session_id": "my-game-1"}
+) as (read, write, _):
+    async with ClientSession(read, write) as s:
+        await s.initialize()
+        await s.call_tool("do_action", {"action": "right"})
 ```
 
 ## Build & run
@@ -51,9 +102,19 @@ export VCPKG_EXTRA_CURL_OPTS=-k             # only if behind SSL interception
 #    `pybaba` (via vcpkg) and `mcp` into Extensions/BabaMCP/.venv.
 uv sync --project Extensions/BabaMCP
 
-# 2. Run the server (stdio transport).
+# 2a. Run over stdio (default).
 uv run --project Extensions/BabaMCP baba-mcp
+
+# 2b. Or run over HTTP (streamable-http at http://0.0.0.0:8000/mcp).
+BABA_MCP_TRANSPORT=http BABA_MCP_HOST=0.0.0.0 BABA_MCP_PORT=8000 \
+  uv run --project Extensions/BabaMCP baba-mcp
+# 2c. Or run your own entry point (see main.py / the factory above).
+uv run --project Extensions/BabaMCP python Extensions/BabaMCP/main.py
 ```
+
+The console entry `baba-mcp` is env-driven: `BABA_MCP_TRANSPORT` (`stdio` default
+| `http`), `BABA_MCP_HOST` (default `0.0.0.0`), `BABA_MCP_PORT` (default `8000`),
+`BABA_MCP_HTTP_PATH` (default `/mcp`).
 
 If you prefer to build the extension in place (matching the repo's Python tests):
 
@@ -137,13 +198,15 @@ uv run --project Extensions/BabaMCP baba-mcp
 
 ### Interactive testing
 
+`main.py` exposes a module-level `mcp` instance for the inspector:
+
 ```bash
-uv run --project Extensions/BabaMCP mcp dev Extensions/BabaMCP/baba_mcp/server.py
+uv run --project Extensions/BabaMCP mcp dev Extensions/BabaMCP/main.py
 ```
 
 ## Registering with a client
 
-Claude Code / Claude Desktop `mcpServers` entry:
+**stdio** — Claude Code / Claude Desktop `mcpServers` entry:
 
 ```json
 {
@@ -156,13 +219,35 @@ Claude Code / Claude Desktop `mcpServers` entry:
 }
 ```
 
+**HTTP** — point the client at the URL and pass the session header:
+
+```json
+{
+  "mcpServers": {
+    "baba": {
+      "url": "http://HOST:8000/mcp",
+      "headers": { "baba_session_id": "my-game-1" }
+    }
+  }
+}
+```
+
 ## Configuration
 
 - `BABA_REPO_ROOT` — override the detected repo root (where map paths are resolved from).
 - `BABA_MAPS_DIR` — override the maps directory (default `Resources/Maps`).
+- `BABA_MCP_TRANSPORT` / `BABA_MCP_HOST` / `BABA_MCP_PORT` / `BABA_MCP_HTTP_PATH` —
+  transport selection for the `baba-mcp` console entry (see [Build & run](#build--run)).
 
 ## Notes
 
-- The server holds a single global "current game"; `load_map`/`load_raw_map`/`reset`
-  clear the move history used by `undo`. This is designed for a single client over
-  stdio. For a multi-client/HTTP transport you would need per-session game state.
+- **Sessions** are in-memory and live only as long as the process. Each holds a
+  live game keyed by `baba_session_id`; `load_map`/`load_raw_map`/`reset` clear that
+  session's `undo` history. The store is capped (`max_sessions`, FIFO eviction).
+- **Single process only.** Because state lives in one process's memory, run a single
+  worker. Multiple worker processes would not share sessions (you'd need an external
+  store).
+- **Security.** The HTTP server is **unauthenticated** and binding `0.0.0.0` does not
+  enable DNS-rebind protection — run it on a trusted network or behind a reverse
+  proxy / auth layer. Pass `TransportSecuritySettings` via the factory if you need
+  host/origin allow-lists.
