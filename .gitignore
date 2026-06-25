@@ -31,6 +31,13 @@ cmake-build-debug
 # Python files
 *.pyc
 /.pytest_cache
+__pycache__/
+
+# Build artifacts
+*.so
+*.egg-info/
+/.venv
+/.buildvenv
 
 # RL files
 events.out.tfevents.*
