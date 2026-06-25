@@ -27,6 +27,7 @@ RUN python3 -m venv ${CMAKE_VENV} && \
 ENV PATH="${CMAKE_VENV}/bin:${PATH}"
 
 ENV VCPKG_ROOT=/opt/vcpkg
+ENV VCPKG_EXTRA_CURL_OPTS="-k"
 RUN git clone https://github.com/microsoft/vcpkg.git ${VCPKG_ROOT} && \
     ${VCPKG_ROOT}/bootstrap-vcpkg.sh
 
