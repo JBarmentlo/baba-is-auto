@@ -65,60 +65,92 @@ baba-is-auto is Baba Is You simulator using C++ with some reinforcement learning
 
 <img src="./Medias/Levels/baba-volcano-v0.png" />
 
-## Quick Start
+## Building
 
-You will need CMake 3.31.6 or later and vcpkg to build the code. If you're using Windows, you need Visual Studio 2017 in addition to CMake.
+### Prerequisites
 
-First, clone the code:
+| Tool | Version | Notes |
+|------|---------|-------|
+| CMake | 4.0+ | |
+| C++ compiler | C++17 | GCC, Clang, or MSVC |
+| vcpkg | any | Manages C++ dependencies |
+| autoconf / automake / libtool | any | macOS/Linux only, needed by vcpkg |
+| pkg-config | any | macOS/Linux only |
+
+### 1. Clone
 
 ```bash
-git clone https://github.com/utilForever/baba-is-auto.git
+git clone https://github.com/JBarmentlo/baba-is-auto.git
 cd baba-is-auto
 ```
 
-Install vcpkg, then set `VCPKG_ROOT` to your vcpkg checkout or pass the vcpkg toolchain file to CMake with `-DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake`.
+### 2. Install vcpkg
 
+**macOS:**
 ```bash
-git clone https://github.com/microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_ROOT="$PWD/vcpkg"
+brew install vcpkg autoconf autoconf-archive automake libtool pkg-config
+git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+~/vcpkg/bootstrap-vcpkg.sh
+export VCPKG_ROOT="$HOME/vcpkg"
 ```
 
-On Windows, run `.\vcpkg\bootstrap-vcpkg.bat` and set `VCPKG_ROOT` to the vcpkg checkout path.
-
-### C++ API
-
-For macOS or Linux or Windows Subsystem for Linux (WSL):
-
+**Linux (Ubuntu/Debian):**
 ```bash
-mkdir build
-cd build
-cmake .. -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-make
+sudo apt install autoconf autoconf-archive automake libtool pkg-config
+git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+~/vcpkg/bootstrap-vcpkg.sh
+export VCPKG_ROOT="$HOME/vcpkg"
 ```
 
-For Windows:
-
+**Windows:**
 ```bat
-mkdir build
-cd build
-cmake .. -G"Visual Studio 15 2017 Win64" -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
-MSBuild baba-is-auto.sln /p:Configuration=Release
+git clone https://github.com/microsoft/vcpkg.git %USERPROFILE%\vcpkg
+%USERPROFILE%\vcpkg\bootstrap-vcpkg.bat
+set VCPKG_ROOT=%USERPROFILE%\vcpkg
+```
+
+### 3. Build
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+vcpkg downloads and builds all dependencies (`doctest`, `pybind11`, `effolkronium-random`) automatically on first run. This takes several minutes the first time; subsequent builds are fast.
+
+### 4. Run tests
+
+```bash
+./build/bin/UnitTests
+```
+
+Expected output:
+```
+[doctest] test cases: 11 | 11 passed | 0 failed | 0 skipped
+[doctest] Status: SUCCESS!
 ```
 
 ### Python API
-
-Build and install the package by running
 
 ```bash
 pip install -U .
 ```
 
-### Docker
+Or with uv:
 
 ```bash
-docker pull utilforever/baba-is-auto:latest
+uv sync
 ```
+
+### Docker
+
+Build the image locally:
+
+```bash
+docker build -t baba-is-auto .
+```
+
+> **Note:** On macOS with Docker Desktop, the Dockerfile sets `VCPKG_EXTRA_CURL_OPTS=-k` to work around SSL interception by Docker Desktop's network stack.
 
 ## Documentation
 
