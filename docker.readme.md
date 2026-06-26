@@ -57,11 +57,12 @@ enroot import -o baba-mcp.sqsh dockerd://baba-mcp:latest # produce the .sqsh
 - **Tools** (12): `get_state`, `get_status`, `do_action`, `do_actions`, `undo`,
   `reset`, `load_map`, `load_raw_map`, `list_maps`, `get_rules`, `end_session`,
   `list_sessions`.
-- **State shape:** `get_state` returns the board as a 2-D grid
-  (`grid[y][x]` = list of stacked object-type names) plus `width`, `height`,
-  `map`, and `status` (`in_progress` / `success` / `dead`).
+- **State shape:** `get_state` is the **only** tool that returns the board — a
+  2-D grid (`grid[y][x]` = list of stacked object-type names) plus `width`,
+  `height`, `map`, and `status` (`in_progress` / `success` / `dead`).
 - **Moves:** `do_action("up"|"down"|"left"|"right"|"idle")`; `do_actions([...])`
-  applies a sequence and stops early on win/loss.
+  applies a sequence and stops early on win/loss. The mutating tools return a
+  compact `{status, ...}` ack (no grid) — call `get_state` for the board.
 
 ### Minimal client
 

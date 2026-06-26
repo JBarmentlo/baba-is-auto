@@ -24,6 +24,7 @@ import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
 
 # --------------------------------------------------------------------------- #
 # Paths
@@ -41,6 +42,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import pyBaba  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from pydantic import Field  # noqa: E402
 
 # Header that selects a session over HTTP, and the implicit session id used
 # when there is no HTTP request (stdio).
@@ -132,6 +134,14 @@ def _state_payload(session: SessionState) -> dict:
         "grid": grid,
         "status": _status_str(game),
     }
+
+
+def _brief(session: SessionState, **extra) -> dict:
+    """Compact result for mutating tools: status only, never the grid.
+
+    Call ``get_state`` to retrieve the board itself.
+    """
+    return {"status": _status_str(session.game), **extra}
 
 
 def _rule_to_names(rule: pyBaba.Rule) -> list[str]:
@@ -247,10 +257,19 @@ def create_baba_mcp(
         return {"maps": sorted(p.stem for p in MAPS_DIR.resolve().glob("*.txt"))}
 
     @mcp.tool()
-    def load_map(name: str) -> dict:
-        """Load a built-in map by name (e.g. 'simple_map') and start a fresh game.
+    def load_map(
+        name: Annotated[
+            str,
+            Field(
+                description="Built-in map name, with or without '.txt' (e.g. "
+                "'simple_map'). Use list_maps to discover names."
+            ),
+        ],
+    ) -> dict:
+        """Load a built-in map by name and start a fresh game for this session.
 
-        Returns the initial board state.
+        Does NOT return the board — call get_state to see it. Returns the
+        width/height and status.
         """
         path = _resolve_map(name)
         sess = _session(_session_id())
@@ -259,15 +278,24 @@ def create_baba_mcp(
         sess.map_source = path.name
         sess.is_raw = False
         sess.history = []
-        return _state_payload(sess)
+        gmap = sess.game.GetMap()
+        return _brief(sess, width=gmap.GetWidth(), height=gmap.GetHeight())
 
     @mcp.tool()
-    def load_raw_map(map_contents: str) -> dict:
+    def load_raw_map(
+        map_contents: Annotated[
+            str,
+            Field(
+                description="Native map text: a 'width height' header line "
+                "followed by exactly width*height integer ObjectType codes "
+                "(same format as Resources/Maps/*.txt)."
+            ),
+        ],
+    ) -> dict:
         """Load a map from raw text in the native format and start a fresh game.
 
-        Format: a 'width height' header line followed by exactly width*height
-        integer ObjectType codes (same as the Resources/Maps/*.txt files). The
-        contents are validated before loading. Returns the initial board state.
+        The contents are validated before loading. Does NOT return the board —
+        call get_state to see it. Returns the width/height and status.
         """
         _validate_raw_map(map_contents)
         sess = _session(_session_id())
@@ -282,20 +310,28 @@ def create_baba_mcp(
         sess.map_source = map_contents
         sess.is_raw = True
         sess.history = []
-        return _state_payload(sess)
+        gmap = sess.game.GetMap()
+        return _brief(sess, width=gmap.GetWidth(), height=gmap.GetHeight())
 
     @mcp.tool()
     def reset() -> dict:
-        """Reset the current level to its initial state and clear the move history."""
+        """Reset the current level to its initial state and clear the move history.
+
+        Does NOT return the board — call get_state to see it. Returns the status.
+        """
         sess = _session(_session_id())
         sess.game.Reset()
         sess.history = []
-        return _state_payload(sess)
+        return _brief(sess)
 
     @mcp.tool()
     def get_state() -> dict:
-        """Return the current board: a 2D grid of stacked object-type names, plus
-        width, height, the map name, and status."""
+        """Return the current board as a 2D grid.
+
+        This is the only tool that returns the board. The result has 'grid'
+        (rows[y][x] = list of stacked object-type name strings), 'width',
+        'height', the 'map' name, and 'status'.
+        """
         return _state_payload(_session(_session_id()))
 
     @mcp.tool()
@@ -314,22 +350,43 @@ def create_baba_mcp(
         return {"rules": [_rule_to_names(r) for r in rules]}
 
     @mcp.tool()
-    def do_action(action: str) -> dict:
-        """Perform one move: up | down | left | right | idle. Returns the new state."""
+    def do_action(
+        action: Annotated[
+            str,
+            Field(
+                description="One move: 'up', 'down', 'left', 'right', or 'idle' "
+                "(case-insensitive)."
+            ),
+        ],
+    ) -> dict:
+        """Perform a single move for this session.
+
+        Does NOT return the board — call get_state to see it. Returns the status.
+        """
         key = action.strip().lower()
         if key not in ACTIONS:
             raise ValueError(f"Invalid action {action!r}. Valid: {VALID_ACTIONS}")
         sess = _session(_session_id())
         sess.game.MovePlayer(ACTIONS[key])
         sess.history.append(key)
-        return _state_payload(sess)
+        return _brief(sess)
 
     @mcp.tool()
-    def do_actions(actions: list[str]) -> dict:
+    def do_actions(
+        actions: Annotated[
+            list[str],
+            Field(
+                description="Ordered list of moves, each 'up'/'down'/'left'/"
+                "'right'/'idle' (case-insensitive). Applied in order; stops "
+                "early if the game is won or lost."
+            ),
+        ],
+    ) -> dict:
         """Perform a sequence of moves, stopping early if the game is won or lost.
 
-        All actions are validated before any is applied. Returns the final state
-        plus 'applied' (how many ran), 'requested', and 'stopped_reason'.
+        All actions are validated before any is applied. Does NOT return the
+        board — call get_state to see it. Returns the status and 'applied' (how
+        many moves ran) vs 'requested'.
         """
         keys = [a.strip().lower() for a in actions]
         bad = sorted({a for a in keys if a not in ACTIONS})
@@ -343,38 +400,33 @@ def create_baba_mcp(
             applied += 1
             if sess.game.GetPlayState() in TERMINAL:
                 break
-        payload = _state_payload(sess)
-        payload.update(
-            applied=applied,
-            requested=len(keys),
-            stopped_reason=payload["status"],
-        )
-        return payload
+        return _brief(sess, applied=applied, requested=len(keys))
 
     @mcp.tool()
-    def undo(steps: int = 1) -> dict:
+    def undo(
+        steps: Annotated[
+            int,
+            Field(description="Number of moves to undo (default 1).", ge=1),
+        ] = 1,
+    ) -> dict:
         """Undo the last N moves (default 1) by resetting and replaying the history.
 
         The simulator has no native undo; this reconstructs the prior state
-        exactly, since moves are deterministic. Returns the new state plus 'undone'.
+        exactly, since moves are deterministic. Does NOT return the board — call
+        get_state to see it. Returns the status and 'undone' count.
         """
         if steps < 1:
             raise ValueError(f"steps must be >= 1, got {steps}.")
         sess = _session(_session_id())
         if not sess.history:
-            payload = _state_payload(sess)
-            payload["undone"] = 0
-            payload["message"] = "Nothing to undo."
-            return payload
+            return _brief(sess, undone=0, message="Nothing to undo.")
         undone = min(steps, len(sess.history))
         replay = sess.history[:-undone]
         sess.game.Reset()
         for key in replay:
             sess.game.MovePlayer(ACTIONS[key])
         sess.history = replay
-        payload = _state_payload(sess)
-        payload["undone"] = undone
-        return payload
+        return _brief(sess, undone=undone)
 
     @mcp.tool()
     def end_session() -> dict:

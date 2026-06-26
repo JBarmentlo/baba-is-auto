@@ -13,16 +13,20 @@ header (see [Transports & sessions](#transports--sessions)).
 
 ## Tools
 
+**`get_state` is the only tool that returns the board.** The mutating tools
+(`do_action`, `do_actions`, `undo`, `reset`, `load_map`, `load_raw_map`) return a
+compact `{status, ...}` acknowledgement — call `get_state` to see the grid.
+
 | Tool | Description |
 | --- | --- |
-| `get_state()` | Current board as a 2D grid (`grid[y][x]` = list of stacked object-type names), plus `width`, `height`, `map`, `status`. |
+| `get_state()` | The board as a 2D grid (`grid[y][x]` = list of stacked object-type names), plus `width`, `height`, `map`, `status`. The only tool returning the grid. |
 | `get_status()` | `success` (won) / `dead` (lost) / `in_progress` / `invalid` (or `no_game`). |
-| `do_action(action)` | One move: `"up" | "down" | "left" | "right" | "idle"` (case-insensitive). Returns the new state. |
-| `do_actions(actions)` | A list of moves; stops early on win/loss. Returns state + `applied`, `requested`, `stopped_reason`. |
-| `undo(steps=1)` | Undo the last N moves (Reset + deterministic replay; the sim has no native undo). |
-| `reset()` | Restart the current level and clear history. |
-| `load_map(name)` | Load a built-in map by name, e.g. `"simple_map"`. |
-| `load_raw_map(map_contents)` | Load a map from raw text in the native format (validated first — see below). |
+| `do_action(action)` | One move: `"up" | "down" | "left" | "right" | "idle"` (case-insensitive). Returns `{status}`. |
+| `do_actions(actions)` | A list of moves; stops early on win/loss. Returns `{status, applied, requested}`. |
+| `undo(steps=1)` | Undo the last N moves (Reset + deterministic replay; the sim has no native undo). Returns `{status, undone}`. |
+| `reset()` | Restart the current level and clear history. Returns `{status}`. |
+| `load_map(name)` | Load a built-in map by name, e.g. `"simple_map"`. Returns `{width, height, status}`. |
+| `load_raw_map(map_contents)` | Load a map from raw text in the native format (validated first — see below). Returns `{width, height, status}`. |
 | `list_maps()` | List built-in map names. Works without a session header. |
 | `get_rules()` | Active rules as object-name triples, e.g. `["BABA","IS","YOU"]`. |
 | `end_session()` | Free the caller's session (its game/history). A later call lazily recreates a fresh one. |
