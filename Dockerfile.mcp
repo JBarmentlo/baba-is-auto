@@ -62,6 +62,15 @@ WORKDIR /app
 RUN ${BABA_VENV}/bin/python setup.py build_ext --inplace && \
     ${BABA_VENV}/bin/python -c "import sys; sys.path.insert(0,'/app'); import pyBaba; print('pyBaba import OK for', sys.version.split()[0])"
 
+# Drop build-only artifacts to shrink the exported rootfs / .sqsh. Runtime needs
+# only /opt/venv (+ its interpreter base under /root/.local/share/uv/python) and
+# /app; the vcpkg tree, cmake venv, and caches are build-time only. (Done in a
+# trailing layer: `docker export` / `enroot import` flatten the rootfs, so the
+# removed files are absent from the .sqsh even though image layers keep them.)
+RUN rm -rf /opt/vcpkg /opt/cmake-venv /app/build /root/.cache /root/.local/bin \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    && /opt/venv/bin/python -c "import sys; sys.path.insert(0,'/app'); import pyBaba; print('post-clean pyBaba OK', sys.version.split()[0])"
+
 # HTTP transport; port is overridable at runtime via BABA_MCP_PORT.
 ENV BABA_MCP_TRANSPORT=http \
     BABA_MCP_HOST=0.0.0.0 \
