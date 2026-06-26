@@ -72,3 +72,11 @@ ENV BABA_MCP_TRANSPORT=http \
 
 EXPOSE 8000
 CMD ["/opt/venv/bin/python", "-m", "baba_mcp.server"]
+
+# Override the ubuntu base image's MULTI-LINE org.opencontainers.image.description
+# label with a single line. enroot import only comments the first physical line of
+# a multi-line label when generating /etc/rc, so the continuation lines leak in as
+# executable shell and break container startup under pyxis (exit 127). This value
+# MUST stay on ONE line with no embedded newlines. (Placed last to preserve build
+# cache; label order does not affect the final merged image config.)
+LABEL org.opencontainers.image.description="BabaMCP: pyBaba Baba Is You HTTP MCP server"
