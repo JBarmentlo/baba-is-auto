@@ -1,0 +1,18 @@
+# maintainer JBarmentlo
+# org.opencontainers.image.created 2026-06-10T03:30:57.931695+00:00
+# org.opencontainers.image.description The Ubuntu container image maintained by Canonical
+# org.opencontainers.image.title ubuntu
+# org.opencontainers.image.version 26.04
+
+mkdir -p "/app" 2> /dev/null
+cd "/app" && unset OLDPWD || exit 1
+
+if [ -s /etc/rc.local ]; then
+    . /etc/rc.local
+fi
+
+if [ $# -gt 0 ]; then
+    exec  "$@"
+else
+    exec  '/opt/venv/bin/python' '-m' 'baba_mcp.server'
+fi
