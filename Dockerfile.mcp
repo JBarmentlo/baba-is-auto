@@ -1,14 +1,23 @@
 # BabaMCP — HTTP MCP server wrapping the pyBaba "Baba Is You" simulator.
 #
-# Build:  podman build -f Dockerfile.mcp -t baba-mcp:latest .
-# Run:    podman run -e BABA_MCP_PORT=8000 -p 8000:8000 baba-mcp:latest
+# Multi-stage: a heavy `builder` compiles pyBaba (vcpkg toolchain) against a
+# pinned uv-managed CPython 3.12; the slim `runtime` keeps only that interpreter,
+# the venv, and the app — no compilers/vcpkg — so the image (and exported .sqsh)
+# stays small.
+#
+# Build:  docker build -f Dockerfile.mcp -t baba-mcp:latest .
+# Run:    docker run -e BABA_MCP_PORT=8000 -p 8000:8000 baba-mcp:latest
 #
 # The server listens on HTTP (streamable-http) at 0.0.0.0:$BABA_MCP_PORT/mcp.
 # Clients select an independent game via the `baba_session_id` request header.
-FROM ubuntu:26.04
-LABEL maintainer="JBarmentlo"
 
-# Build + runtime toolchain. zip + autotools are required by several vcpkg ports.
+# --------------------------------------------------------------------------- #
+# Builder: full toolchain, compiles pyBaba.
+# --------------------------------------------------------------------------- #
+FROM ubuntu:26.04 AS builder
+
+# Build toolchain. zip + autotools are required by several vcpkg ports; python3*
+# is needed to create the cmake venv (builder-only — not carried into runtime).
 RUN apt-get update && apt-get install -y \
     autoconf \
     autoconf-archive \
@@ -62,14 +71,32 @@ WORKDIR /app
 RUN ${BABA_VENV}/bin/python setup.py build_ext --inplace && \
     ${BABA_VENV}/bin/python -c "import sys; sys.path.insert(0,'/app'); import pyBaba; print('pyBaba import OK for', sys.version.split()[0])"
 
-# Drop build-only artifacts to shrink the exported rootfs / .sqsh. Runtime needs
-# only /opt/venv (+ its interpreter base under /root/.local/share/uv/python) and
-# /app; the vcpkg tree, cmake venv, and caches are build-time only. (Done in a
-# trailing layer: `docker export` / `enroot import` flatten the rootfs, so the
-# removed files are absent from the .sqsh even though image layers keep them.)
-RUN rm -rf /opt/vcpkg /opt/cmake-venv /app/build /root/.cache /root/.local/bin \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    && /opt/venv/bin/python -c "import sys; sys.path.insert(0,'/app'); import pyBaba; print('post-clean pyBaba OK', sys.version.split()[0])"
+# --------------------------------------------------------------------------- #
+# Runtime: minimal — only the interpreter, venv, and app are carried over.
+# --------------------------------------------------------------------------- #
+FROM ubuntu:26.04 AS runtime
+LABEL maintainer="JBarmentlo"
+
+# Only the shared libs pyBaba.so needs at runtime (libstdc++6 / libgcc); the
+# uv-managed CPython is self-contained. No compilers or vcpkg here.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# The uv-managed CPython base (the venv's bin/python symlinks into this path, so
+# it must live at the same absolute location), then the venv (mcp + deps) itself.
+COPY --from=builder /root/.local/share/uv/python /root/.local/share/uv/python
+COPY --from=builder /opt/venv /opt/venv
+
+# Just the runtime app surface: the compiled module, the MCP package, and the
+# maps. The server resolves repo root as /app and maps as /app/Resources/Maps.
+COPY --from=builder /app/pyBaba.cpython-*.so /app/
+COPY --from=builder /app/Extensions/BabaMCP /app/Extensions/BabaMCP
+COPY --from=builder /app/Resources/Maps /app/Resources/Maps
+WORKDIR /app
+
+# Fail the build fast if the slim runtime can't import the module.
+RUN /opt/venv/bin/python -c "import sys; sys.path.insert(0,'/app'); import pyBaba, mcp; print('runtime pyBaba+mcp OK', sys.version.split()[0])"
 
 # HTTP transport; port is overridable at runtime via BABA_MCP_PORT.
 ENV BABA_MCP_TRANSPORT=http \
