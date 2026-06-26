@@ -1,15 +1,15 @@
 [project]
 name = "baba-mcp"
 version = "0.1.0"
-description = "MCP server wrapping the pyBaba Baba Is You simulator"
+description = "MCP server wrapping the canonical Baba Is You engine (baba library)"
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.2.0", "pybaba"]
+dependencies = ["mcp>=1.8", "baba"]
 
 [project.scripts]
 baba-mcp = "baba_mcp.server:main"
 
 [tool.uv.sources]
-pybaba = { path = "../../", editable = true }
+baba = { path = "../Baba", editable = true }
 
 [build-system]
 requires = ["hatchling"]

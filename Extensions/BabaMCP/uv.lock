@@ -43,18 +43,33 @@ wheels = [
 ]
 
 [[package]]
-name = "baba-mcp"
+name = "baba"
 version = "0.1.0"
-source = { editable = "." }
+source = { editable = "../Baba" }
 dependencies = [
-    { name = "mcp" },
-    { name = "pybaba" },
+    { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
-    { name = "pybaba", editable = "../../" },
+    { name = "pydantic", specifier = ">=2" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "baba-mcp"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "baba" },
+    { name = "mcp" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "baba", editable = "../Baba" },
+    { name = "mcp", specifier = ">=1.8" },
 ]
 
 [[package]]
@@ -231,7 +246,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -345,16 +360,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/c1/ee/94c6c50ffc5b5cf47
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/e1/4c1dc1fbb688641a712d34650c3d58bbbdcb314ddb75bc5817bbf33515a4/mcp-1.28.0-py3-none-any.whl", hash = "sha256:9c1e7cf3a9125557e418ecd4fed8e9adddce81b0dfdae4d6601d700f5beb71a4", size = 221959, upload-time = "2026-06-16T21:37:16.579Z" },
 ]
-
-[[package]]
-name = "pybaba"
-version = "0.1"
-source = { editable = "../../" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
 
 [[package]]
 name = "pycparser"

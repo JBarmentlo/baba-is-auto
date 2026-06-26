@@ -1,118 +1,34 @@
-# BabaMCP — HTTP MCP server wrapping the pyBaba "Baba Is You" simulator.
+# BabaMCP — HTTP MCP server over the pure-Python canonical Baba Is You engine.
 #
-# Multi-stage: a heavy `builder` compiles pyBaba (vcpkg toolchain) against a
-# pinned uv-managed CPython 3.12; the slim `runtime` keeps only that interpreter,
-# the venv, and the app — no compilers/vcpkg — so the image (and exported .sqsh)
-# stays small.
+# Pure Python now (no C++/vcpkg), so the image is tiny and builds in seconds.
 #
 # Build:  docker build -f Dockerfile.mcp -t baba-mcp:latest .
 # Run:    docker run -e BABA_MCP_PORT=8000 -p 8000:8000 baba-mcp:latest
 #
-# The server listens on HTTP (streamable-http) at 0.0.0.0:$BABA_MCP_PORT/mcp.
-# Clients select an independent game via the `baba_session_id` request header.
-
-# --------------------------------------------------------------------------- #
-# Builder: full toolchain, compiles pyBaba.
-# --------------------------------------------------------------------------- #
-FROM ubuntu:26.04 AS builder
-
-# Build toolchain. zip + autotools are required by several vcpkg ports; python3*
-# is needed to create the cmake venv (builder-only — not carried into runtime).
-RUN apt-get update && apt-get install -y \
-    autoconf \
-    autoconf-archive \
-    automake \
-    build-essential \
-    curl \
-    git \
-    libtool \
-    ninja-build \
-    pkg-config \
-    python3-dev \
-    python3-pip \
-    python3-setuptools \
-    python3-venv \
-    tar \
-    unzip \
-    zip \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# cmake >= 3.31.6 (Ubuntu's apt cmake is older), installed into an isolated venv.
-ENV CMAKE_VENV=/opt/cmake-venv
-RUN python3 -m venv ${CMAKE_VENV} && \
-    ${CMAKE_VENV}/bin/pip install "cmake>=3.31.6"
-ENV PATH="${CMAKE_VENV}/bin:${PATH}"
-
-# vcpkg toolchain (provides pybind11, doctest, effolkronium-random).
-ENV VCPKG_ROOT=/opt/vcpkg
-ENV VCPKG_EXTRA_CURL_OPTS="-k"
-RUN git clone https://github.com/microsoft/vcpkg.git ${VCPKG_ROOT} && \
-    ${VCPKG_ROOT}/bootstrap-vcpkg.sh
-
-# uv provides a reproducible standalone CPython. We pin one interpreter for BOTH
-# building and running pyBaba so the module ABI always matches (the base image's
-# system python is a different version, which is what caused ABI mismatches).
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
-
-ENV BABA_VENV=/opt/venv
-ENV BABA_PYTHON=3.12
-RUN uv venv ${BABA_VENV} --python ${BABA_PYTHON} && \
-    uv pip install --python ${BABA_VENV} setuptools wheel pybind11 "mcp>=1.8"
-
-COPY . /app
-WORKDIR /app
-
-# Build the pyBaba extension against the venv interpreter via setup.py
-# (build_ext --inplace -> /app/pyBaba.cpython-3XX-*.so at the repo root, which
-# the server adds to sys.path). cmake + the vcpkg toolchain come from PATH /
-# VCPKG_ROOT set above. The import check fails the build fast on any ABI mismatch.
-RUN ${BABA_VENV}/bin/python setup.py build_ext --inplace && \
-    ${BABA_VENV}/bin/python -c "import sys; sys.path.insert(0,'/app'); import pyBaba; print('pyBaba import OK for', sys.version.split()[0])"
-
-# --------------------------------------------------------------------------- #
-# Runtime: minimal — only the interpreter, venv, and app are carried over.
-# --------------------------------------------------------------------------- #
-FROM ubuntu:26.04 AS runtime
+# Serves streamable-http at 0.0.0.0:$BABA_MCP_PORT/mcp; clients select a game via
+# the `baba_session_id` request header.
+FROM python:3.12-slim
 LABEL maintainer="JBarmentlo"
 
-# Only the shared libs pyBaba.so needs at runtime (libstdc++6 / libgcc); the
-# uv-managed CPython is self-contained. No compilers or vcpkg here.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
-
-# The uv-managed CPython base (the venv's bin/python symlinks into this path, so
-# it must live at the same absolute location), then the venv (mcp + deps) itself.
-COPY --from=builder /root/.local/share/uv/python /root/.local/share/uv/python
-COPY --from=builder /opt/venv /opt/venv
-
-# Just the runtime app surface: the compiled module, the MCP package, and the
-# maps. The server resolves repo root as /app and maps as /app/Resources/Maps.
-COPY --from=builder /app/pyBaba.cpython-*.so /app/
-COPY --from=builder /app/Extensions/BabaMCP /app/Extensions/BabaMCP
-COPY --from=builder /app/Resources/Maps /app/Resources/Maps
 WORKDIR /app
+COPY Extensions/Baba /app/Extensions/Baba
+COPY Extensions/BabaMCP /app/Extensions/BabaMCP
+COPY Resources/Maps /app/Resources/Maps
 
-# Fail the build fast if the slim runtime can't import the module.
-RUN /opt/venv/bin/python -c "import sys; sys.path.insert(0,'/app'); import pyBaba, mcp; print('runtime pyBaba+mcp OK', sys.version.split()[0])"
+# Install the engine (+ its deps) and mcp, then the server itself (no re-resolve).
+RUN pip install --no-cache-dir /app/Extensions/Baba "mcp>=1.8" \
+    && pip install --no-cache-dir --no-deps /app/Extensions/BabaMCP \
+    && python -c "import baba, baba_mcp; print('baba+baba_mcp import OK')"
 
-# HTTP transport; port is overridable at runtime via BABA_MCP_PORT.
 ENV BABA_MCP_TRANSPORT=http \
     BABA_MCP_HOST=0.0.0.0 \
     BABA_MCP_PORT=8000 \
     BABA_MCP_HTTP_PATH=/mcp \
-    PYTHONPATH=/app/Extensions/BabaMCP \
+    BABA_REPO_ROOT=/app \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8000
-CMD ["/opt/venv/bin/python", "-m", "baba_mcp.server"]
+CMD ["baba-mcp"]
 
-# Override the ubuntu base image's MULTI-LINE org.opencontainers.image.description
-# label with a single line. enroot import only comments the first physical line of
-# a multi-line label when generating /etc/rc, so the continuation lines leak in as
-# executable shell and break container startup under pyxis (exit 127). This value
-# MUST stay on ONE line with no embedded newlines. (Placed last to preserve build
-# cache; label order does not affect the final merged image config.)
-LABEL org.opencontainers.image.description="BabaMCP: pyBaba Baba Is You HTTP MCP server"
+# Single-line description so enroot's /etc/rc parser doesn't choke (see history).
+LABEL org.opencontainers.image.description="BabaMCP: canonical Baba Is You HTTP MCP server"

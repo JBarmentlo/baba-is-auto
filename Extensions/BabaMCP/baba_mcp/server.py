@@ -1,7 +1,7 @@
-"""FastMCP server exposing the pyBaba "Baba Is You" simulator.
+"""FastMCP server exposing the canonical Baba Is You engine (the ``baba`` library).
 
-A thin, in-process layer over the ``pyBaba`` pybind11 module. It lets an agent
-observe the board grid (not an image), submit moves, check win/lose status,
+A thin, in-process layer over the pure-Python ``baba`` engine. It lets an agent
+observe the board (grid + text render), submit moves, check win/lose status,
 manage levels, and undo.
 
 The server supports many concurrent **sessions**, each with its own independent
@@ -19,30 +19,23 @@ it however you like (stdio, streamable-http, or by mounting the ASGI app):
 from __future__ import annotations
 
 import os
-import sys
-import tempfile
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
+
+import baba
+from baba import Direction, Game, Status
+from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
-# server.py lives at <repo>/Extensions/BabaMCP/baba_mcp/server.py -> parents[3]
 _DEFAULT_ROOT = Path(__file__).resolve().parents[3]
 REPO_ROOT = Path(os.environ.get("BABA_REPO_ROOT") or _DEFAULT_ROOT)
 MAPS_DIR = Path(os.environ.get("BABA_MAPS_DIR") or (REPO_ROOT / "Resources" / "Maps"))
 DEFAULT_MAP = "baba_is_you.txt"
-
-# The pyBaba extension is built in place at the repo root (setup.py build_ext
-# --inplace). Make it importable regardless of the launch directory.
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-import pyBaba  # noqa: E402
-from mcp.server.fastmcp import FastMCP  # noqa: E402
-from pydantic import Field  # noqa: E402
 
 # Header that selects a session over HTTP, and the implicit session id used
 # when there is no HTTP request (stdio).
@@ -53,21 +46,20 @@ STDIO_SESSION_ID = "stdio"
 # Enum maps
 # --------------------------------------------------------------------------- #
 ACTIONS = {
-    "up": pyBaba.Direction.UP,
-    "down": pyBaba.Direction.DOWN,
-    "left": pyBaba.Direction.LEFT,
-    "right": pyBaba.Direction.RIGHT,
-    "idle": pyBaba.Direction.NONE,
+    "up": Direction.UP,
+    "down": Direction.DOWN,
+    "left": Direction.LEFT,
+    "right": Direction.RIGHT,
+    "idle": Direction.NONE,
 }
 VALID_ACTIONS = sorted(ACTIONS)
 
 STATUS = {
-    pyBaba.PlayState.WON: "success",
-    pyBaba.PlayState.LOST: "dead",
-    pyBaba.PlayState.PLAYING: "in_progress",
-    pyBaba.PlayState.INVALID: "invalid",
+    Status.WON: "success",
+    Status.LOST: "dead",
+    Status.PLAYING: "in_progress",
 }
-TERMINAL = (pyBaba.PlayState.WON, pyBaba.PlayState.LOST)
+TERMINAL = (Status.WON, Status.LOST)
 
 
 # --------------------------------------------------------------------------- #
@@ -75,21 +67,18 @@ TERMINAL = (pyBaba.PlayState.WON, pyBaba.PlayState.LOST)
 # --------------------------------------------------------------------------- #
 @dataclass
 class SessionState:
-    """A single client's independent game.
+    """A single client's independent game (the baba.Game holds its own history)."""
 
-    ``map_source``/``is_raw``/``history`` keep the session fully reconstructible
-    (load + replay) even though a live game object is retained for speed.
-    """
+    game: Game
+    map_name: str  # "baba_is_you.txt" | "<raw>"
 
-    game: pyBaba.Game
-    map_name: str  # display name: a filename or "<raw>"
-    map_source: str  # filename for built-in maps, or raw contents when is_raw
-    is_raw: bool
-    history: list[str] = field(default_factory=list)  # action keys since load
+    @property
+    def moves(self) -> int:
+        return max(0, len(self.game._history) - 1)
 
 
 # --------------------------------------------------------------------------- #
-# Pure helpers (no session/global state)
+# Helpers
 # --------------------------------------------------------------------------- #
 def _resolve_map(name: str) -> Path:
     """Resolve a map name (with or without .txt) to a path inside MAPS_DIR."""
@@ -105,56 +94,33 @@ def _resolve_map(name: str) -> Path:
 def _new_game_from_map(name: str) -> SessionState:
     """Build a fresh SessionState for a built-in map name."""
     path = _resolve_map(name)
-    return SessionState(
-        game=pyBaba.Game(str(path)),
-        map_name=path.name,
-        map_source=path.name,
-        is_raw=False,
-    )
+    return SessionState(game=Game(path.read_text(), fmt="intgrid"), map_name=path.name)
 
 
-def _status_str(game: pyBaba.Game) -> str:
-    return STATUS.get(game.GetPlayState(), "invalid")
+def _status_str(game: Game) -> str:
+    return STATUS.get(game.status(), "invalid")
 
 
 def _state_payload(session: SessionState) -> dict:
-    """Build the canonical state payload: the map as-is plus dimensions/status."""
-    game = session.game
-    gmap = game.GetMap()
-    width, height = gmap.GetWidth(), gmap.GetHeight()
-    flat = gmap.GetGrid()  # row-major, length width*height; each cell a list of ObjectType
-    grid = [
-        [[obj.name for obj in flat[y * width + x]] for x in range(width)]
-        for y in range(height)
-    ]
+    """The canonical state payload: the board (grid + text) + dimensions/status."""
+    state = session.game.state
     return {
         "map": session.map_name,
-        "width": width,
-        "height": height,
-        "grid": grid,
-        "status": _status_str(game),
+        "width": state.width,
+        "height": state.height,
+        "grid": baba.to_grid(state),
+        "text": baba.render_text(state),
+        "status": _status_str(session.game),
     }
 
 
 def _brief(session: SessionState, **extra) -> dict:
-    """Compact result for mutating tools: status only, never the grid.
-
-    Call ``get_state`` to retrieve the board itself.
-    """
+    """Compact result for mutating tools: status only, never the grid."""
     return {"status": _status_str(session.game), **extra}
 
 
-def _rule_to_names(rule: pyBaba.Rule) -> list[str]:
-    """Render a Rule as a list of object-type name strings, e.g. ['BABA','IS','YOU']."""
-    names: list[str] = []
-    for obj in rule.objects:
-        types = obj.GetTypes()
-        names.append(types[0].name if types else "EMPTY")
-    return names
-
-
 def _validate_raw_map(map_contents: str) -> None:
-    """Validate the native int-grid map format before handing it to pyBaba."""
+    """Validate the native int-grid map format before loading (clear errors)."""
     tokens = map_contents.split()
     if len(tokens) < 2:
         raise ValueError(
@@ -188,43 +154,24 @@ def create_baba_mcp(
     require_session_header: bool = True,
     **fastmcp_kwargs,
 ) -> FastMCP:
-    """Create a configured FastMCP server wrapping the Baba Is You simulator.
-
-    The returned instance has all tools registered and an isolated, per-instance
-    session store. Serve it however you like::
-
-        mcp = create_baba_mcp(host="0.0.0.0", port=8000)
-        mcp.run(transport="streamable-http")   # or mcp.run() for stdio
+    """Create a configured FastMCP server wrapping the canonical Baba engine.
 
     Args:
-        max_sessions: Cap on concurrent in-memory sessions; the oldest is evicted
-            (FIFO) when exceeded. An evicted client transparently gets a fresh
-            default game on its next call.
+        max_sessions: Cap on concurrent in-memory sessions (FIFO eviction).
         require_session_header: Over HTTP, require the ``baba_session_id`` header
-            on state-touching tools (recommended). If False, header-less HTTP
-            requests share a single ``"default"`` session.
-        **fastmcp_kwargs: Passed to ``FastMCP(...)`` (e.g. host, port,
-            streamable_http_path). ``stateless_http`` and ``json_response``
-            default to True but may be overridden.
+            on state-touching tools. If False, header-less HTTP shares "default".
+        **fastmcp_kwargs: Passed to ``FastMCP(...)`` (host, port, ...).
     """
     opts = {"stateless_http": True, "json_response": True, **fastmcp_kwargs}
     mcp = FastMCP("baba-is-you", **opts)
 
-    # Per-instance session store. Insertion-ordered for FIFO eviction.
     sessions: "OrderedDict[str, SessionState]" = OrderedDict()
 
-    # ----- session helpers (close over `mcp` and `sessions`) ----- #
     def _session_id() -> str:
-        """Resolve the session id from the request header.
-
-        HTTP: read ``baba_session_id``; required unless require_session_header is
-        False (then fall back to "default"). stdio: there is no HTTP request, so
-        use the single implicit STDIO_SESSION_ID.
-        """
         try:
             request = mcp.get_context().request_context.request
         except Exception:
-            request = None  # accessed outside an active request
+            request = None
         if request is None:
             return STDIO_SESSION_ID
         sid = request.headers.get(SESSION_HEADER)
@@ -238,155 +185,129 @@ def create_baba_mcp(
         return "default"
 
     def _session(session_id: str) -> SessionState:
-        """Return the session, lazily creating it with the default map."""
         sess = sessions.get(session_id)
         if sess is None:
             sess = _new_game_from_map(DEFAULT_MAP)
             sessions[session_id] = sess
             while len(sessions) > max_sessions:
-                sessions.popitem(last=False)  # FIFO: drop the oldest session
+                sessions.popitem(last=False)
         else:
-            sessions.move_to_end(session_id)  # LRU touch
+            sessions.move_to_end(session_id)
         return sess
 
     # --------------------------------- tools --------------------------------- #
     @mcp.tool()
     def list_maps() -> dict:
         """List the names of the built-in maps available to load."""
-        # No session needed — enables discovery before a session header is set.
         return {"maps": sorted(p.stem for p in MAPS_DIR.resolve().glob("*.txt"))}
 
     @mcp.tool()
     def load_map(
         name: Annotated[
             str,
-            Field(
-                description="Built-in map name, with or without '.txt' (e.g. "
-                "'simple_map'). Use list_maps to discover names."
-            ),
+            Field(description="Built-in map name, with or without '.txt' (e.g. "
+                  "'simple_map'). Use list_maps to discover names."),
         ],
     ) -> dict:
         """Load a built-in map by name and start a fresh game for this session.
 
-        Does NOT return the board — call get_state to see it. Returns the
-        width/height and status.
+        Does NOT return the board — call get_state to see it. Returns width/height
+        and status.
         """
         path = _resolve_map(name)
         sess = _session(_session_id())
-        sess.game = pyBaba.Game(str(path))
+        sess.game = Game(path.read_text(), fmt="intgrid")
         sess.map_name = path.name
-        sess.map_source = path.name
-        sess.is_raw = False
-        sess.history = []
-        gmap = sess.game.GetMap()
-        return _brief(sess, width=gmap.GetWidth(), height=gmap.GetHeight())
+        st = sess.game.state
+        return _brief(sess, width=st.width, height=st.height)
 
     @mcp.tool()
     def load_raw_map(
         map_contents: Annotated[
             str,
-            Field(
-                description="Native map text: a 'width height' header line "
-                "followed by exactly width*height integer ObjectType codes "
-                "(same format as Resources/Maps/*.txt)."
-            ),
+            Field(description="Native map text: a 'width height' header line "
+                  "followed by exactly width*height integer ObjectType codes "
+                  "(same format as Resources/Maps/*.txt)."),
         ],
     ) -> dict:
         """Load a map from raw text in the native format and start a fresh game.
 
-        The contents are validated before loading. Does NOT return the board —
-        call get_state to see it. Returns the width/height and status.
+        Validated before loading. Does NOT return the board — call get_state.
+        Returns width/height and status.
         """
         _validate_raw_map(map_contents)
         sess = _session(_session_id())
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-            tmp.write(map_contents)
-            tmp_path = tmp.name
-        try:
-            sess.game = pyBaba.Game(tmp_path)
-        finally:
-            os.unlink(tmp_path)
+        sess.game = Game(map_contents, fmt="intgrid")
         sess.map_name = "<raw>"
-        sess.map_source = map_contents
-        sess.is_raw = True
-        sess.history = []
-        gmap = sess.game.GetMap()
-        return _brief(sess, width=gmap.GetWidth(), height=gmap.GetHeight())
+        st = sess.game.state
+        return _brief(sess, width=st.width, height=st.height)
 
     @mcp.tool()
     def reset() -> dict:
-        """Reset the current level to its initial state and clear the move history.
+        """Reset the current level to its initial state and clear move history.
 
-        Does NOT return the board — call get_state to see it. Returns the status.
+        Does NOT return the board — call get_state. Returns the status.
         """
         sess = _session(_session_id())
-        sess.game.Reset()
-        sess.history = []
+        sess.game.reset()
         return _brief(sess)
 
     @mcp.tool()
     def get_state() -> dict:
-        """Return the current board as a 2D grid.
+        """Return the current board.
 
-        This is the only tool that returns the board. The result has 'grid'
-        (rows[y][x] = list of stacked object-type name strings), 'width',
-        'height', the 'map' name, and 'status'.
+        The only tool that returns the board: 'grid' (rows[y][x] = stacked names;
+        text tiles suffixed '_TEXT'), a human-readable 'text' render, plus 'width',
+        'height', 'map', 'status'.
         """
         return _state_payload(_session(_session_id()))
 
     @mcp.tool()
     def get_status() -> dict:
-        """Return the game status: success (won), dead (lost), in_progress, or invalid."""
+        """Return the game status: success (won), dead (lost), in_progress."""
         sess = sessions.get(_session_id())  # do not lazily create
         if sess is None:
             return {"status": "no_game"}
-        return {"status": _status_str(sess.game), "raw": sess.game.GetPlayState().name}
+        return {"status": _status_str(sess.game), "raw": sess.game.status().value}
 
     @mcp.tool()
     def get_rules() -> dict:
-        """Return the currently active rules as object-name triples, e.g. ['BABA','IS','YOU']."""
+        """Return the active rules as object-name triples, e.g. ['BABA','IS','YOU']."""
         sess = _session(_session_id())
-        rules = sess.game.GetRuleManager().GetAllRules()
-        return {"rules": [_rule_to_names(r) for r in rules]}
+        return {"rules": [list(r) for r in sess.game.rules()]}
 
     @mcp.tool()
     def do_action(
         action: Annotated[
             str,
-            Field(
-                description="One move: 'up', 'down', 'left', 'right', or 'idle' "
-                "(case-insensitive)."
-            ),
+            Field(description="One move: 'up', 'down', 'left', 'right', or 'idle' "
+                  "(case-insensitive)."),
         ],
     ) -> dict:
         """Perform a single move for this session.
 
-        Does NOT return the board — call get_state to see it. Returns the status.
+        Does NOT return the board — call get_state. Returns the status.
         """
         key = action.strip().lower()
         if key not in ACTIONS:
             raise ValueError(f"Invalid action {action!r}. Valid: {VALID_ACTIONS}")
         sess = _session(_session_id())
-        sess.game.MovePlayer(ACTIONS[key])
-        sess.history.append(key)
+        sess.game.do(ACTIONS[key])
         return _brief(sess)
 
     @mcp.tool()
     def do_actions(
         actions: Annotated[
             list[str],
-            Field(
-                description="Ordered list of moves, each 'up'/'down'/'left'/"
-                "'right'/'idle' (case-insensitive). Applied in order; stops "
-                "early if the game is won or lost."
-            ),
+            Field(description="Ordered list of moves, each 'up'/'down'/'left'/"
+                  "'right'/'idle' (case-insensitive). Applied in order; stops "
+                  "early if the game is won or lost."),
         ],
     ) -> dict:
-        """Perform a sequence of moves, stopping early if the game is won or lost.
+        """Perform a sequence of moves, stopping early on win/loss.
 
-        All actions are validated before any is applied. Does NOT return the
-        board — call get_state to see it. Returns the status and 'applied' (how
-        many moves ran) vs 'requested'.
+        All actions validated first. Does NOT return the board — call get_state.
+        Returns status and 'applied' (how many ran) vs 'requested'.
         """
         keys = [a.strip().lower() for a in actions]
         bad = sorted({a for a in keys if a not in ACTIONS})
@@ -395,38 +316,31 @@ def create_baba_mcp(
         sess = _session(_session_id())
         applied = 0
         for key in keys:
-            sess.game.MovePlayer(ACTIONS[key])
-            sess.history.append(key)
+            sess.game.do(ACTIONS[key])
             applied += 1
-            if sess.game.GetPlayState() in TERMINAL:
+            if sess.game.status() in TERMINAL:
                 break
         return _brief(sess, applied=applied, requested=len(keys))
 
     @mcp.tool()
     def undo(
         steps: Annotated[
-            int,
-            Field(description="Number of moves to undo (default 1).", ge=1),
+            int, Field(description="Number of moves to undo (default 1).", ge=1)
         ] = 1,
     ) -> dict:
-        """Undo the last N moves (default 1) by resetting and replaying the history.
+        """Undo the last N moves (default 1).
 
-        The simulator has no native undo; this reconstructs the prior state
-        exactly, since moves are deterministic. Does NOT return the board — call
-        get_state to see it. Returns the status and 'undone' count.
+        Native, exact undo (pops the state history). Does NOT return the board —
+        call get_state. Returns the status and 'undone' count.
         """
         if steps < 1:
             raise ValueError(f"steps must be >= 1, got {steps}.")
         sess = _session(_session_id())
-        if not sess.history:
+        before = sess.moves
+        if before == 0:
             return _brief(sess, undone=0, message="Nothing to undo.")
-        undone = min(steps, len(sess.history))
-        replay = sess.history[:-undone]
-        sess.game.Reset()
-        for key in replay:
-            sess.game.MovePlayer(ACTIONS[key])
-        sess.history = replay
-        return _brief(sess, undone=undone)
+        sess.game.undo(steps)
+        return _brief(sess, undone=before - sess.moves)
 
     @mcp.tool()
     def end_session() -> dict:
@@ -440,7 +354,7 @@ def create_baba_mcp(
         """List active sessions (id, current map, move count) for debugging/ops."""
         return {
             "sessions": [
-                {"id": sid, "map": s.map_name, "moves": len(s.history)}
+                {"id": sid, "map": s.map_name, "moves": s.moves}
                 for sid, s in sessions.items()
             ],
             "count": len(sessions),
